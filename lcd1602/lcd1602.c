@@ -1,5 +1,11 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
+#include <linux/kobject.h>
+
+#define DEBUG
+
+// maximum length of string in lcd
+#define LCD_STR_MAX_LEN (50)
 
 #define ENABLE_BIT 		(0x01 << 2) // Enable bit
 #define REGSELECT_BIT 	(0x01)  // Register select bit
@@ -44,7 +50,10 @@ struct lcd1602
 {
 	struct i2c_client *client;
 	struct device* dev;
+	char curr_val[LCD_STR_MAX_LEN];
+	ssize_t curr_val_len;
 };
+
 
 static int lcd_write_4bits(struct i2c_client *client, char data)
 {
@@ -62,9 +71,11 @@ static int lcd_write_4bits(struct i2c_client *client, char data)
 	return ret;
 }
 
-static int lcd_write_cmd(struct i2c_client *client, char cmd, char mode)
+static int lcd_write_cmd(struct device* dev, char cmd, char mode)
 {
 	int ret;
+	struct lcd1602* data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	
 	ret = lcd_write_4bits(client, mode | (cmd & 0xF0));
 	if (ret<0)
@@ -75,76 +86,124 @@ static int lcd_write_cmd(struct i2c_client *client, char cmd, char mode)
 	return ret;
 }
 
-static int lcd_write_string(struct i2c_client *client, const char* string, const int str_len, const int line)
+ssize_t lcd_write_string(struct device* dev, const char* string, const ssize_t str_len, const int line)
 {
-	int ret;
+	ssize_t ret;
+	ssize_t cnt;
 
 	switch (line)
 	{
 		case 1:
-			lcd_write_cmd(client, 0x80,0x00);
+			ret = lcd_write_cmd(dev, 0x80,0x00);
 			break;
 		case 2:
-			lcd_write_cmd(client, 0xC0,0x00);
+			ret = lcd_write_cmd(dev, 0xC0,0x00);
 			break;
 		case 3:
-			lcd_write_cmd(client, 0x94,0x00);
+			ret = lcd_write_cmd(dev, 0x94,0x00);
 			break;
 		case 4:
-			lcd_write_cmd(client, 0xD4,0x00);
+			ret = lcd_write_cmd(dev, 0xD4,0x00);
 			break;
 		default:
 			printk(KERN_ERR, "incorrect line number %d", line);
-			return -1;/*### to be changed, see the errors provided by the kernel ###*/
+			ret = -1;
 			break;
 	}
+	
+	if (ret < 0)
+		return ret;
 
-	int cnt;
 	for (cnt=0; cnt< str_len; cnt++)
 	{
 		/*### here see the ord written in the python code #####*/
-		lcd_write_cmd(client, string[cnt],REGSELECT_BIT);
+		ret = lcd_write_cmd(dev, string[cnt],REGSELECT_BIT);
+		if (ret < 0)
+			return ret;
 	}
-	
-	return ret;
+
+	return cnt;
 }
 
 
-int lcd_init(struct i2c_client *client)
+int lcd_init(struct device *dev)
 {
-	lcd_write_cmd(client, 0x03,0x00 );
-	lcd_write_cmd(client, 0x03,0x00 );
-	lcd_write_cmd(client, 0x03,0x00 );
-	lcd_write_cmd(client, 0x02,0x00 );
+    lcd_write_cmd(dev, 0x03,0x00 );
+    lcd_write_cmd(dev, 0x03,0x00 );
+    lcd_write_cmd(dev, 0x03,0x00 );
+    lcd_write_cmd(dev, 0x02,0x00 );
 
-	lcd_write_cmd(client, LCD_FUNCTIONSET | LCD_2LINE | LCD_5x8DOTS | LCD_4BITMODE,0x00);
-    lcd_write_cmd(client, LCD_DISPLAYCONTROL | LCD_DISPLAYON,0x00);
-    lcd_write_cmd(client, LCD_CLEARDISPLAY,0x00);
-    lcd_write_cmd(client, LCD_ENTRYMODESET | LCD_ENTRYLEFT,0x00);
+    lcd_write_cmd(dev, LCD_FUNCTIONSET | LCD_2LINE | LCD_5x8DOTS | LCD_4BITMODE,0x00);
+    lcd_write_cmd(dev, LCD_DISPLAYCONTROL | LCD_DISPLAYON,0x00);
+    lcd_write_cmd(dev, LCD_CLEARDISPLAY,0x00);
+    lcd_write_cmd(dev, LCD_ENTRYMODESET | LCD_ENTRYLEFT,0x00);
 
 	return 0;
 }
 
+static ssize_t show_lcd_content(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	struct lcd1602* data = dev_get_drvdata(dev);
+	memcpy(buf, data->curr_val, data->curr_val_len);
+	return data->curr_val_len;
+}
+
+static ssize_t store_lcd_content(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf,
+				size_t len)
+{
+	struct lcd1602* data = dev_get_drvdata(dev);
+	data->curr_val_len = (len > LCD_STR_MAX_LEN)?LCD_STR_MAX_LEN:len;
+	// write the string in the internal struct
+	strcpy(data->curr_val, buf);
+	printk(KERN_INFO"data->curr_val = %s, strlen(data->curr_val) =%i \n",data->curr_val,strlen(data->curr_val));
+	//return lcd_write_string(dev, data->curr_val, data->curr_val_len, 1);
+	return lcd_write_string(dev, data->curr_val, strlen(data->curr_val)-1, 1) + 1;
+}
+
+static DEVICE_ATTR(lcd_content, S_IRUGO | S_IWUSR,
+		show_lcd_content, store_lcd_content);
 
 int lcd1602_probe(struct i2c_client *client, const struct i2c_device_id* id)
 {
-	struct lcd1602* lcd;
+	struct lcd1602* lcd_data;
+	char* init_str= "lcd init";
+	int ret=0;
 
-	printk(KERN_INFO "probe lcd !!! \n");
-	printk(KERN_INFO "client->addr = %0x \n", client->addr);
+	printk(KERN_INFO "probe lcd, client->addr = %0x \n", client->addr);
 
-	lcd= devm_kzalloc(&client->dev,sizeof(struct lcd1602),GFP_KERNEL);
+	lcd_data= devm_kzalloc(&client->dev,sizeof(struct lcd1602),GFP_KERNEL);
 
-	if (!lcd)
+	if (!lcd_data)
 		return -ENOMEM;
 
-	lcd->client = client;
-	lcd->dev = &client->dev;
+	dev_set_drvdata(&client->dev, lcd_data);
 
-	lcd_init(client);
+	lcd_data->client = client;
+	lcd_data->dev = &client->dev;
 
-	lcd_write_string(client, "lcd init :)", 5 ,1);
+	lcd_init(&client->dev);
 
+	ret = device_create_file(&client->dev, &dev_attr_lcd_content);
+	if (ret) {
+		dev_err(&client->dev, "failed: create sysfs entry\n");
+		goto err;
+	}
+
+	lcd_write_string(&client->dev, init_str, strlen(init_str) ,1);
+
+	return 0;
+err:
+	device_remove_file(&client->dev, &dev_attr_lcd_content);
+	return ret;
+}
+
+int lcd1602_remove(struct i2c_client *client)
+{
+	device_remove_file(&client->dev, &dev_attr_lcd_content);
 	return 0;
 }
 
@@ -161,6 +220,7 @@ static struct i2c_driver lcd1602_driver = {
 		.of_match_table = lcd1602_of_match,
 	},
 	.probe = lcd1602_probe,
+	.remove = lcd1602_remove,
 };
 
 module_i2c_driver(lcd1602_driver);
