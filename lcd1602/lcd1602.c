@@ -1,7 +1,12 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
-#include <linux/kobject.h>
+//#include <delay.h>
 
+#define CLEAR_DISPLAY 1
+#define LCD_WIDTH 20
+#define LCD_ROWS 2
+
+//#########
 #define DEBUG
 
 // maximum length of string in lcd
@@ -57,6 +62,7 @@ struct lcd1602
 
 static int lcd_write_4bits(struct i2c_client *client, char data)
 {
+	/*#### why here a buffer with one element ### ? */
 	char buffer[1];
 	int ret;
 
@@ -64,9 +70,11 @@ static int lcd_write_4bits(struct i2c_client *client, char data)
 	ret = i2c_master_send(client, buffer, sizeof(buffer));
 	if (ret<0)
 		return ret;
+	//msleep(5);
 	
 	buffer[0]= (data & ~ENABLE_BIT) | LCD_BACKLIGHT;
 	ret = i2c_master_send(client, buffer, sizeof(buffer));
+	//msleep(5);
 	
 	return ret;
 }
@@ -86,36 +94,36 @@ static int lcd_write_cmd(struct device* dev, char cmd, char mode)
 	return ret;
 }
 
+int lcd_clear(struct device* dev)
+{
+	return lcd_write_cmd(dev, CLEAR_DISPLAY, REGSELECT_BIT);
+}
+
 ssize_t lcd_write_string(struct device* dev, const char* string, const ssize_t str_len, const int line)
 {
 	ssize_t ret;
 	ssize_t cnt;
 
-	switch (line)
-	{
-		case 1:
-			ret = lcd_write_cmd(dev, 0x80,0x00);
-			break;
-		case 2:
-			ret = lcd_write_cmd(dev, 0xC0,0x00);
-			break;
-		case 3:
-			ret = lcd_write_cmd(dev, 0x94,0x00);
-			break;
-		case 4:
-			ret = lcd_write_cmd(dev, 0xD4,0x00);
-			break;
-		default:
-			printk(KERN_ERR, "incorrect line number %d", line);
-			ret = -1;
-			break;
-	}
-	
+	uint8_t lines [4] = {
+		0x80,
+		0xC0,
+		0x94,
+		0xD4
+	};
+
+	lcd_clear(dev);
+
+	printk(KERN_INFO ">>>> string = %s, %x\n", string, str_len );
+
+/* ### Do we need this !! */
+	ret = lcd_write_cmd(dev, lines [line-1],0x00);
 	if (ret < 0)
 		return ret;
 
 	for (cnt=0; cnt< str_len; cnt++)
 	{
+		
+		printk(KERN_INFO ">>>> character = %c, %x\n", string[cnt], string[cnt]);
 		/*### here see the ord written in the python code #####*/
 		ret = lcd_write_cmd(dev, string[cnt],REGSELECT_BIT);
 		if (ret < 0)
@@ -126,17 +134,35 @@ ssize_t lcd_write_string(struct device* dev, const char* string, const ssize_t s
 }
 
 
+#if 0
+ssize_t lcd_text(struct device* dev, const char* string, const ssize_t str_len, const int line)
+{
+	// devide the text to 2 part
+	char* line1 [LCD_WIDTH ];
+	char* line2 [LCD_WIDTH ];
+
+	ssize_t len_to_write= str_len<LCD_WIDTH ? str_len:LCD_WIDTH;
+	
+	
+	ssize_t remain_to_write = str_len - len_to_write;
+
+	strcpy(line1, string, len_to_write);
+	lcd_write_string(dev, line1,len_to_write, line);
+
+	lcd_text(dev, line2,remain_to_write,line++);
+
+}
+#endif
+
+
 int lcd_init(struct device *dev)
 {
-    lcd_write_cmd(dev, 0x03,0x00 );
-    lcd_write_cmd(dev, 0x03,0x00 );
-    lcd_write_cmd(dev, 0x03,0x00 );
-    lcd_write_cmd(dev, 0x02,0x00 );
-
-    lcd_write_cmd(dev, LCD_FUNCTIONSET | LCD_2LINE | LCD_5x8DOTS | LCD_4BITMODE,0x00);
-    lcd_write_cmd(dev, LCD_DISPLAYCONTROL | LCD_DISPLAYON,0x00);
-    lcd_write_cmd(dev, LCD_CLEARDISPLAY,0x00);
-    lcd_write_cmd(dev, LCD_ENTRYMODESET | LCD_ENTRYLEFT,0x00);
+	lcd_write_cmd(dev, 0x33,0);
+    lcd_write_cmd(dev, 0x32,0);
+    lcd_write_cmd(dev, 0x06,0);
+    lcd_write_cmd(dev, 0x0C,0);
+    lcd_write_cmd(dev, 0x28,0);
+    lcd_write_cmd(dev, CLEAR_DISPLAY,0);
 
 	return 0;
 }
@@ -158,8 +184,10 @@ static ssize_t store_lcd_content(struct device *dev,
 	struct lcd1602* data = dev_get_drvdata(dev);
 	data->curr_val_len = (len > LCD_STR_MAX_LEN)?LCD_STR_MAX_LEN:len;
 	// write the string in the internal struct
+	//###char* test = "abcdefghijklmno";
+	//###dev_dbg(dev, ">>> string : %s", buf);
 	strcpy(data->curr_val, buf);
-	printk(KERN_INFO"data->curr_val = %s, strlen(data->curr_val) =%i \n",data->curr_val,strlen(data->curr_val));
+	printk(KERN_INFO"data->curr_val = %s, strlen(data->curr_val) =%i len = %i\n",data->curr_val,strlen(data->curr_val), len);
 	//return lcd_write_string(dev, data->curr_val, data->curr_val_len, 1);
 	return lcd_write_string(dev, data->curr_val, strlen(data->curr_val)-1, 1) + 1;
 }
@@ -180,18 +208,23 @@ int lcd1602_probe(struct i2c_client *client, const struct i2c_device_id* id)
 	if (!lcd_data)
 		return -ENOMEM;
 
+	printk(KERN_INFO ">>> 1\n");
 	dev_set_drvdata(&client->dev, lcd_data);
 
+	printk(KERN_INFO ">>> 2\n");
 	lcd_data->client = client;
 	lcd_data->dev = &client->dev;
 
 	lcd_init(&client->dev);
+
+	printk(KERN_INFO ">>> 3\n");
 
 	ret = device_create_file(&client->dev, &dev_attr_lcd_content);
 	if (ret) {
 		dev_err(&client->dev, "failed: create sysfs entry\n");
 		goto err;
 	}
+	printk(KERN_INFO ">>> 4\n");
 
 	lcd_write_string(&client->dev, init_str, strlen(init_str) ,1);
 
@@ -228,3 +261,5 @@ module_i2c_driver(lcd1602_driver);
 MODULE_DESCRIPTION("lcd1602 driver");
 MODULE_AUTHOR("Achraf Boussetta <boussettaachraf26@gmail.com>");
 MODULE_LICENSE("GPL");
+
+
