@@ -15,7 +15,8 @@
 		compatible="btn_device_driver";
 		btn-gpio= <&gpio 5 GPIO_ACTIVE_LOW>;
 		status = "okay";
-	};	
+	};
+ * Reference https://learning.oreilly.com/library/view/linux-device-drivers/9781785280009/fc82e0c9-741d-4141-b99e-272bbe997468.xhtml	
 */
 
 static struct gpio_desc* btn;
